@@ -8,7 +8,7 @@ DATABASE_URI = os.environ.get("DATABASE_URI", "mongodb+srv://...")
 DATABASE_NAME = os.environ.get("DATABASE_NAME", "Cluster0")
 
 VDISK_API_KEY = os.environ.get("VDISK_API_KEY", "your_vdiskpro_api_key")
-OMDB_API_KEY = os.environ.get("OMDB_API_KEY", "your_omdb_api_key")
+TMDB_API_KEY = os.environ.get("OMDB_API_KEY", "your_omdb_api_key")
 
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "1834715690"))
 

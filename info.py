@@ -13,4 +13,4 @@ TMDB_API_KEY = os.environ.get("OMDB_API_KEY", "your_omdb_api_key")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "1834715690"))
 
 REQUEST_CHANNEL = int(os.environ.get("REQUEST_CHANNEL", "-1003987425981"))
-LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", "-1004404960044")
+LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", "-1004404960044"))

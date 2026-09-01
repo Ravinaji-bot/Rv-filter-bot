@@ -12,7 +12,7 @@ from database.ia_filterdb import (
     save_movie_request,
     get_manual_filter
 )
-from info import VDISK_API_KEY, OMDB_API_KEY, REQUEST_CHANNEL
+from info import VDISK_API_KEY, TMDB_API_KEY, REQUEST_CHANNEL
 from utils import clean_file_name, get_spelling_suggestion, get_google_search_url
 
 DEFAULT_THUMBNAIL = "https://telegra.ph/file/default_poster.jpg"
@@ -24,14 +24,17 @@ def clean_movie_title(title: str) -> str:
 
 async def fetch_landscape_poster(session: aiohttp.ClientSession, movie_name: str) -> str:
     clean_name = clean_movie_title(movie_name)
-    url = f"http://www.omdbapi.com/?t={clean_name}&apikey={OMDB_API_KEY}"
+    url = f"https://api.themoviedb.org/3/search/movie?api_key={TMDB_API_KEY}&query={clean_name}"
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
             data = await resp.json()
-            if data.get("Response") == "True" and data.get("Poster") != "N/A":
-                return data.get("Poster")
-    except Exception:
-        pass
+            results = data.get("results")
+            if results and len(results) > 0:
+                poster_path = results[0].get("backdrop_path") or results[0].get("poster_path")
+                if poster_path:
+                    return f"https://image.tmdb.org/t/p/w500{poster_path}"
+    except Exception as e:
+        print(f"TMDB Fetch Error: {e}")
     return DEFAULT_THUMBNAIL
 
 async def get_vdisk_link(session: aiohttp.ClientSession, url: str) -> str:
@@ -278,4 +281,4 @@ async def send_file_card(client, query):
 @Client.on_callback_query(filters.regex("close_data"))
 async def close_cb(client, query):
     await query.message.delete()
-        
+                                       

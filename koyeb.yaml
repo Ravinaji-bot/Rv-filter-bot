@@ -1,7 +1,27 @@
 type: worker
-name: rv-filter-bot
+name: autofilter-vdisk-bot
 build:
+  type: docker
   dockerfile: Dockerfile
-run:
-  command: python bot.py
-  
+env:
+  - key: API_ID
+    value: "1234567"
+  - key: API_HASH
+    value: "your_api_hash"
+  - key: BOT_TOKEN
+    value: "your_bot_token"
+  - key: DATABASE_URI
+    value: "mongodb+srv://..."
+  - key: DATABASE_NAME
+    value: "Cluster0"
+  - key: VDISK_API_KEY
+    value: "your_vdiskpro_api_key"
+  - key: OMDB_API_KEY
+    value: "your_omdb_api_key"
+  - key: ADMIN_ID
+    value: "123456789"
+  - key: REQUEST_CHANNEL
+    value: "-1001111111111"
+  - key: LOG_CHANNEL
+    value: "-1002222222222"
+    

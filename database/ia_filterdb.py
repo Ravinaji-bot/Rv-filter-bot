@@ -22,7 +22,7 @@ async def create_db_indexes():
         await files_col.create_index([("file_name", "text")], name="filename_text_idx")
         await files_col.create_index("file_id", unique=True)
         await manual_filters_col.create_index([("chat_id", 1), ("keyword", 1)], unique=True)
-        logging.info("MongoDB Text & Manual Filter Indexes Configured Successfully!")
+        logging.info("⚡ MongoDB Text & Manual Filter Indexes Configured Successfully!")
     except Exception as e:
         logging.error(f"Index Error: {e}")
 
@@ -63,9 +63,45 @@ async def get_file_details(file_id: str):
         logging.error(f"DB Fetch Error: {e}")
         return None
 
+async def get_all_file_titles():
+    try:
+        cursor = files_col.find({}, {"file_name": 1}).limit(500)
+        titles = [doc["file_name"] async for doc in cursor if "file_name" in doc]
+        return titles
+    except Exception:
+        return []
+
+async def is_chat_approved(chat_id: int) -> bool:
+    chat = await approved_chats_col.find_one({"chat_id": chat_id})
+    return True if chat else False
+
+async def approve_chat_in_db(chat_id: int):
+    await approved_chats_col.update_one(
+        {"chat_id": chat_id}, {"$set": {"status": "approved"}}, upsert=True
+    )
+
+async def remove_approved_chat(chat_id: int):
+    await approved_chats_col.delete_one({"chat_id": chat_id})
+
+async def ban_user_in_db(user_id: int):
+    await banned_users_col.update_one(
+        {"user_id": user_id}, {"$set": {"status": "banned"}}, upsert=True
+    )
+
+async def unban_user_in_db(user_id: int):
+    await banned_users_col.delete_one({"user_id": user_id})
+
 async def is_user_banned(user_id: int) -> bool:
     user = await banned_users_col.find_one({"user_id": user_id})
     return True if user else False
+
+async def save_movie_request(user_id: int, user_name: str, movie_name: str):
+    await requests_col.insert_one({
+        "user_id": user_id,
+        "user_name": user_name,
+        "movie_name": movie_name,
+        "status": "pending"
+    })
 
 async def add_user_to_db(user_id: int, user_name: str):
     exists = await users_col.find_one({"user_id": user_id})
@@ -109,8 +145,15 @@ async def add_manual_filter(chat_id: int, keyword: str, text: str, file_id: str 
         upsert=True
     )
 
+async def get_manual_filter(chat_id: int, keyword: str):
+    keyword = keyword.lower().strip()
+    return await manual_filters_col.find_one({"chat_id": chat_id, "keyword": keyword})
+
 async def delete_manual_filter(chat_id: int, keyword: str) -> bool:
     keyword = keyword.lower().strip()
     result = await manual_filters_col.delete_one({"chat_id": chat_id, "keyword": keyword})
     return result.deleted_count > 0
-      
+
+async def get_all_manual_filters(chat_id: int):
+    cursor = manual_filters_col.find({"chat_id": chat_id})
+    return await cursor.to_list(length=100)

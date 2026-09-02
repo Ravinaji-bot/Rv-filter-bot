@@ -1,200 +1,199 @@
+import os
+import re
+import base64
+import logging
+import random
 import asyncio
-import math
-import psutil
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from database.ia_filterdb import (
-    save_file_to_db, 
-    get_db_stats, 
-    ban_user_in_db, 
-    unban_user_in_db,
-    save_movie_request,
-    add_user_to_db
+import aiohttp
+import pytz
+from datetime import datetime
+from .pmfilter import auto_filter 
+from Script import script
+from database.refer import referdb
+from database.config_db import mdb
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from pyrogram import Client, filters, enums, StopPropagation
+from database.ia_filterdb import get_file_details
+from database.users_chats_db import db
+from info import (
+    LOG_CHANNEL, EMOJI_MODE, REACTIONS, UPDATE_CHNL_LNK, PICS, PICS_URL, ADMINS, 
+    SUBSCRIPTION, OWNER_LNK, OWNER_UPI_ID, QR_CODE, AUTH_CHANNELS, AUTH_REQ_CHANNELS, 
+    FSUB_PICS, CUSTOM_FILE_CAPTION
 )
-from info import ADMIN_ID, REQUEST_CHANNEL, LOG_CHANNEL
+from utils import (
+    get_settings, is_subscribed, is_req_subscribed, get_size, 
+    temp, clean_filename, get_random_mix_id
+)
 
-def make_progress_bar(current: int, total: int) -> str:
-    percentage = (current / total) * 100
-    filled = math.floor((percentage / 100) * 10)
-    unfilled = 10 - filled
-    bar = "█" * filled + "░" * unfilled
-    return f"`[{bar}]` **{percentage:.1f}%**"
+logger = logging.getLogger(__name__)
 
-@Client.on_message(filters.command("start") & filters.private)
-async def start_handler(client, message):
-    user = message.from_user
-    user_name = f"{user.first_name} (@{user.username})" if user.username else user.first_name
-    
-    is_new = await add_user_to_db(user.id, user_name)
-    if is_new:
-        try:
-            log_text = (
-                "👤 **#New_User Joined Bot!**\n\n"
-                f"• **Name:** {user.first_name}\n"
-                f"• **ID:** `{user.id}`\n"
-                f"• **Username:** @{user.username if user.username else 'None'}"
+TIMEZONE = "Asia/Kolkata"
+
+# Vdiskpro API se short/streaming link banane ka function
+async def get_vdisk_link(url_or_file):
+    api_key = os.environ.get("VDISK_API_KEY", "YOUR_VDISK_API_KEY")
+    api_url = f"https://vdiskpro.com/api?api={api_key}&url={url_or_file}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url) as response:
+                res = await response.json()
+                if res.get("status") == "success" or "shortlink" in res:
+                    return res.get("shortlink") or res.get("url")
+                return res.get("url", url_or_file)
+    except Exception as e:
+        logger.error(f"Vdiskpro API Error: {e}")
+        return url_or_file
+
+
+@Client.on_message(filters.command("start") & filters.incoming)
+async def start(client, message):
+    try:
+        if EMOJI_MODE:
+            try:
+                await message.react(emoji=random.choice(REACTIONS), big=True)
+            except Exception:
+                await message.react(emoji="⚡️")
+
+        # Group Start Logic
+        if message.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
+            buttons = [
+                [InlineKeyboardButton('❤️ ᴀᴅᴅ ᴍᴇ ᴛᴏ ʏᴏᴜʀ ɢʀᴏᴜᴘ ❤️', url=f'http://t.me/{temp.U_NAME}?startgroup=true')],
+                [InlineKeyboardButton('🍁 Update Channel 🍁', url=UPDATE_CHNL_LNK)]
+            ]
+            await message.reply(
+                script.GSTART_TXT.format(message.from_user.mention if message.from_user else message.chat.title, temp.U_NAME, temp.B_NAME), 
+                reply_markup=InlineKeyboardMarkup(buttons), 
+                disable_web_page_preview=True
             )
-            await client.send_message(chat_id=LOG_CHANNEL, text=log_text)
-        except Exception as e:
-            print(f"New User Log Error: {e}")
+            if not await db.get_chat(message.chat.id):
+                total = await client.get_chat_members_count(message.chat.id)
+                await client.send_message(LOG_CHANNEL, script.LOG_TEXT_G.format(message.chat.title, message.chat.id, total, "Unknown"))       
+                await db.add_chat(message.chat.id, message.chat.title)
+            return 
 
-    await message.reply_text(f"👋 **Hello {user.first_name}!**\n\nJust send me any Movie or Series name to search!")
+        # New User Registration
+        if not await db.is_user_exist(message.from_user.id):
+            await db.add_user(message.from_user.id, message.from_user.first_name)
+            await client.send_message(LOG_CHANNEL, script.LOG_TEXT_P.format(message.from_user.id, message.from_user.mention))
 
-@Client.on_message(filters.command("request") & (filters.private | filters.group))
-async def request_command(client, message):
-    if len(message.command) < 2:
-        return await message.reply_text(
-            "⚠️ **How to use:**\n`/request <Movie Name>`\n\n"
-            "Example: `/request Inception 2010`"
-        )
-
-    movie_name = message.text.split(None, 1)[1].strip()
-    user = message.from_user
-    user_info = f"{user.first_name} (@{user.username})" if user.username else f"{user.first_name} (`{user.id}`)"
-
-    await save_movie_request(user.id, user_info, movie_name)
-
-    btn = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Mark as Uploaded / Done", callback_data=f"req_done_{user.id}")]
-    ])
-
-    request_msg = (
-        "📥 **New Anonymous Movie Request!**\n\n"
-        f"👤 **Requested By:** {user_info}\n"
-        f"🆔 **User ID:** `{user.id}`\n"
-        f"🎬 **Requested Movie:** `{movie_name}`"
-    )
-
-    try:
-        await client.send_message(chat_id=REQUEST_CHANNEL, text=request_msg, reply_markup=btn)
-    except Exception as e:
-        print(f"Failed to send request to Request Channel: {e}")
-
-    await message.reply_text(
-        f"✅ **Your request has been successfully registered!**\n\n"
-        f"🎬 **Movie:** `{movie_name}`\n"
-        "It will be updated in the system as soon as available."
-    )
-
-@Client.on_callback_query(filters.regex(r"^req_done_"))
-async def request_done_callback(client, query):
-    if query.from_user.id != ADMIN_ID:
-        return await query.answer("❌ Access Denied! Admin only feature.", show_alert=True)
-    
-    await query.message.edit_text(
-        f"{query.message.text.markdown}\n\n✅ **Status:** `Handled & Completed`"
-    )
-    await query.answer("Request Status Updated!")
-
-@Client.on_message(filters.command("index") & filters.private)
-async def batch_index_command(client, message):
-    if message.from_user.id != ADMIN_ID:
-        return await message.reply_text("❌ Access Denied! Admin feature only.")
-
-    if not message.reply_to_message or not message.reply_to_message.forward_from_chat:
-        return await message.reply_text("⚠️ Please forward a message from channel and reply with `/index`.")
-
-    msg = await message.reply_text("⏳ **Starting Indexing Process...**")
-    chat_id = message.reply_to_message.forward_from_chat.id
-    last_msg_id = message.reply_to_message.forward_from_message_id
-    
-    total_messages = last_msg_id
-    current_count = 0
-    total_saved_files = 0
-    duplicate_files = 0
-
-    try:
-        async for channel_msg in client.get_chat_history(chat_id, limit=last_msg_id):
-            current_count += 1
-            media = channel_msg.document or channel_msg.video
+        # Plain /start Command
+        if len(message.command) != 2:
+            buttons = [
+                [InlineKeyboardButton('🔰 ᴀᴅᴅ ᴍᴇ ᴛᴏ ʏᴏᴜʀ ɢʀᴏᴜᴘ 🔰', url=f'http://t.me/{temp.U_NAME}?startgroup=true')],
+                [InlineKeyboardButton(' ʜᴇʟᴘ 📢', callback_data='help'), InlineKeyboardButton(' ᴀʙᴏᴜᴛ 📖', callback_data='about')],
+                [InlineKeyboardButton('ᴛᴏᴘ sᴇᴀʀᴄʜɪɴɢ ⭐', callback_data="topsearch"), InlineKeyboardButton('ᴜᴘɢʀᴀᴅᴇ 🎟', callback_data="premium_info")]
+            ]
+            curr_time = datetime.now(pytz.timezone(TIMEZONE)).hour        
+            gtxt = "ɢᴏᴏᴅ ᴍᴏʀɴɪɴɢ 🌞" if curr_time < 12 else ("ɢᴏᴏᴅ ᴀғᴛᴇʀɴᴏᴏɴ 🌓" if curr_time < 17 else ("ɢᴏᴏᴅ ᴇᴠᴇɴɪɴɢ 🌘" if curr_time < 21 else "ɢᴏᴏᴅ ɴɪɢʜᴛ 🌑"))
             
-            if media:
-                file_id = media.file_id
-                raw_name = media.file_name or channel_msg.caption or "Unknown File"
-                file_size = media.file_size
+            PIC = PICS[0] if len(PICS) == 1 else f"{random.choice(PICS_URL)}?r={get_random_mix_id()}"
+            await message.reply_photo(
+                photo=PIC,
+                caption=script.START_TXT.format(message.from_user.mention, gtxt, temp.U_NAME, temp.B_NAME),
+                reply_markup=InlineKeyboardMarkup(buttons),
+                parse_mode=enums.ParseMode.HTML
+            )
+            return
 
-                saved = await save_file_to_db(file_id, raw_name, file_size)
-                if saved:
-                    total_saved_files += 1
-                else:
-                    duplicate_files += 1
+        # Premium Information
+        if message.command[1] == "premium":
+            buttons = [
+                [InlineKeyboardButton('📲 ꜱᴇɴᴅ ᴘᴀʏᴍᴇɴᴛ ꜱᴄʀᴇᴇɴꜱʜᴏᴛ', url=OWNER_LNK)],
+                [InlineKeyboardButton('UPI ID Copy Karein', copy_text=OWNER_UPI_ID)],
+                [InlineKeyboardButton('❌ ᴄʟᴏꜱᴇ ❌', callback_data='close_data')]
+            ]
+            await message.reply_photo(
+                photo=SUBSCRIPTION,
+                caption=script.PREPLANS_TXT.format(message.from_user.mention, OWNER_UPI_ID, QR_CODE),
+                reply_markup=InlineKeyboardMarkup(buttons),
+                parse_mode=enums.ParseMode.HTML
+            )
+            return  
 
-            if current_count % 20 == 0 or current_count == total_messages:
-                progress_ui = make_progress_bar(current_count, total_messages)
-                try:
-                    await msg.edit_text(
-                        f"⚡ **Live Indexing Progress...**\n\n"
-                        f"{progress_ui}\n\n"
-                        f"📊 **Scanned:** `{current_count}/{total_messages}`\n"
-                        f"✅ **Cleaned & Saved:** `{total_saved_files}`\n"
-                        f"⚠️ **Duplicates Skipped:** `{duplicate_files}`"
-                    )
-                except Exception:
-                    pass
-                await asyncio.sleep(1)
+        # Inline search redirect
+        if message.command[1].startswith('getfile'):
+            movies = message.command[1].split("-", 1)[1] 
+            message.text = movies.replace('-', ' ') 
+            await auto_filter(client, message)
+            raise StopPropagation
 
-        final_progress = make_progress_bar(total_messages, total_messages)
-        await msg.edit_text(
-            f"🎉 **Indexing 100% Completed!**\n\n"
-            f"{final_progress}\n\n"
-            f"✅ **Saved:** `{total_saved_files}` | ⚠️ **Skipped:** `{duplicate_files}`"
-        )
+        data = message.command[1]
+        try:
+            _, grp_id, file_id = data.split("_", 2)
+            grp_id = int(grp_id)
+        except Exception:
+            grp_id = 0
+            file_id = data
+
+        # Force Subscription Check
+        btn = []
+        settings = await get_settings(grp_id)
+        fsub_channels = list(dict.fromkeys((settings.get('fsub', []) if settings else []) + AUTH_CHANNELS)) 
+
+        if fsub_channels:
+            btn += await is_subscribed(client, message.from_user.id, fsub_channels)
+        if AUTH_REQ_CHANNELS:
+            btn += await is_req_subscribed(client, message.from_user.id, AUTH_REQ_CHANNELS)
+            
+        if btn:
+            if "_" in message.command[1]:
+                kk, fid = message.command[1].split("_", 1)
+                btn.append([InlineKeyboardButton("♻️ ᴛʀʏ ᴀɢᴀɪɴ ♻️", callback_data=f"checksub#{kk}#{fid}")])
+            photo = random.choice(FSUB_PICS) if FSUB_PICS else "https://graph.org/file/7478ff3eac37f4329c3d8.jpg"
+            await message.reply_photo(
+                photo=photo,
+                caption=script.FORCESUB_TXT.format(message.from_user.mention),
+                reply_markup=InlineKeyboardMarkup(btn),
+                parse_mode=enums.ParseMode.HTML
+            )
+            return
+
+        # Base64 file ID decode
+        decoded_file_id = file_id
+        if not data.startswith("allfiles"):
+            try:
+                raw = base64.urlsafe_b64decode(file_id + "=" * (-len(file_id) % 4))
+                sep = raw.find(b"_")
+                if sep != -1:
+                    decoded_file_id = raw[sep + 1:].decode("latin1")
+            except Exception:
+                pass
+
+        # Message Process indicator
+        msg_wait = await message.reply_text("<b>⚡️ Generating Vdiskpro Stream Link...</b>")
+
+        # Send Single File Streaming Link via Vdiskpro
+        files_ = await get_file_details(decoded_file_id)
+        if files_:
+            file_single = files_[0]
+            title = clean_filename(file_single.file_name)
+            size = get_size(file_single.file_size)
+
+            # Vdiskpro API Link Generation
+            # original telegram streaming endpoint ya direct link pass karein
+            stream_url = f"https://t.me/{temp.U_NAME}?start=stream_{decoded_file_id}"
+            vdisk_link = await get_vdisk_link(stream_url)
+
+            btn = [
+                [InlineKeyboardButton("🎬 Watch / Download Stream Link 🎬", url=vdisk_link)],
+                [InlineKeyboardButton("🍁 Main Channel 🍁", url=UPDATE_CHNL_LNK)]
+            ]
+
+            caption_text = (
+                f"<b>📁 File Name:</b> <code>{title}</code>\n"
+                f"<b>⚡️ File Size:</b> <code>{size}</code>\n\n"
+                f"<i>Neeche diye gaye button par click karke video streaming/download karein:</i>"
+            )
+
+            await msg_wait.delete()
+            await message.reply_text(
+                text=caption_text,
+                reply_markup=InlineKeyboardMarkup(btn),
+                parse_mode=enums.ParseMode.HTML
+            )
+        else:
+            await msg_wait.edit_text("<b><i>ɴᴏ ꜱᴜᴄʜ ꜰɪʟᴇ ᴇxɪꜱᴛꜱ !</i></b>")
+
     except Exception as e:
-        await msg.edit_text(f"❌ **Error:** `{e}`")
-
-@Client.on_message(filters.command("stats") & filters.private)
-async def bot_stats_command(client, message):
-    if message.from_user.id != ADMIN_ID:
-        return await message.reply_text("❌ Access Denied! Admin feature only.")
-
-    msg = await message.reply_text("🔄 **Fetching Stats...**")
-    try:
-        stats = await get_db_stats()
-        cpu_usage = psutil.cpu_percent(interval=1)
-        ram = psutil.virtual_memory()
-        ram_used_mb = ram.used / (1024 * 1024)
-        ram_total_mb = ram.total / (1024 * 1024)
-        
-        stats_text = (
-            "📊 **Live Bot & Server Statistics**\n\n"
-            "🖥️ **Server Hardware Status:**\n"
-            f"🔹 **CPU Usage:** `{cpu_usage}%`\n"
-            f"🔹 **RAM Usage:** `{ram.percent}%` (`{ram_used_mb:.1f}MB` / `{ram_total_mb:.1f}MB`)\n\n"
-            "📁 **Database Status:**\n"
-            f"🔹 **Total Users:** `{stats['total_users']:,}`\n"
-            f"🔹 **Total Indexed Files:** `{stats['total_files']:,}`\n"
-            f"🔹 **Manual Filters:** `{stats['total_manual_filters']:,}`\n"
-            f"🔹 **Approved Groups:** `{stats['total_chats']}`\n"
-            f"🔹 **DB Storage Used:** `{stats['db_size']}`\n\n"
-            "⚡ **System Status:** `Online & Operational`"
-        )
-        await msg.edit_text(stats_text)
-    except Exception as e:
-        await msg.edit_text(f"❌ Stats Error: `{e}`")
-
-@Client.on_message(filters.command("ban") & filters.private)
-async def ban_user_command(client, message):
-    if message.from_user.id != ADMIN_ID:
-        return await message.reply_text("❌ Access Denied! Admin feature only.")
-    if len(message.command) < 2:
-        return await message.reply_text("⚠️ **Usage:** `/ban <User_ID>`")
-    try:
-        user_id = int(message.command[1])
-        await ban_user_in_db(user_id)
-        await message.reply_text(f"🚫 **User Banned Successfully!**\nID: `{user_id}`")
-    except Exception as e:
-        await message.reply_text(f"❌ Error: `{e}`")
-
-@Client.on_message(filters.command("unban") & filters.private)
-async def unban_user_command(client, message):
-    if message.from_user.id != ADMIN_ID:
-        return await message.reply_text("❌ Access Denied! Admin feature only.")
-    if len(message.command) < 2:
-        return await message.reply_text("⚠️ **Usage:** `/unban <User_ID>`")
-    try:
-        user_id = int(message.command[1])
-        await unban_user_in_db(user_id)
-        await message.reply_text(f"✅ **User Unbanned Successfully!**\nID: `{user_id}`")
-    except Exception as e:
-        await message.reply_text(f"❌ Error: `{e}`")
-                                  
+        logger.exception(f"Error in start command: {e}")
+                    

@@ -1,0 +1,72 @@
+from pyrogram import Client, filters, StopPropagation
+from utils import temp
+from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
+from database.users_chats_db import db
+from info import SUPPORT_CHAT, ADMINS
+import os
+
+async def banned_users(_, client, message: Message):
+    return (
+        message.from_user is not None or not message.sender_chat
+    ) and message.from_user.id in temp.BANNED_USERS
+
+banned_user = filters.create(banned_users)
+
+async def disabled_chat(_, client, message: Message):
+    return message.chat.id in temp.BANNED_CHATS
+
+disabled_group = filters.create(disabled_chat)
+
+
+@Client.on_message(filters.command('banned') & filters.user(ADMINS))
+async def get_banned(client, message):
+    banned_users, _ = await db.get_banned()
+    if not banned_users:
+        await message.reply_text("No banned users found.")
+        return
+    
+    text = ""
+    for user_id in banned_users:
+        try:
+            user = await client.get_users(user_id)
+            text += f"{user.mention} (`{user.id}`)\n"
+        except Exception:
+            text += f"Undefined (`{user_id}`)\n"
+    
+    if len(text) > 4096:
+        file_path = 'banned_users.txt'
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        await message.reply_document(file_path)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    else:
+        await message.reply_text(text)
+
+
+@Client.on_message(filters.private & banned_user & filters.incoming, group=-1)
+async def ban_reply(bot, message):
+    ban = await db.get_ban_status(message.from_user.id)
+    reason = ban.get("ban_reason", "No reason provided") if ban else "No reason provided"
+    await message.reply(f'Sorry Dude, You are Banned from using me.\n\n<b>Ban Reason:</b> {reason}')
+    raise StopPropagation
+
+
+@Client.on_message(filters.group & disabled_group & filters.incoming, group=-1)
+async def grp_bd(bot, message):
+    buttons = [[InlineKeyboardButton('Support', url=SUPPORT_CHAT)]]
+    reply_markup = InlineKeyboardMarkup(buttons)
+    vazha = await db.get_chat(message.chat.id)
+    reason = vazha.get('reason', 'No reason provided') if vazha else 'No reason provided'
+    
+    k = await message.reply(
+        text=f"<b>CHAT NOT ALLOWED ⚠️</b>\n\nMy admins have restricted me from working here! Contact support if you have queries.\n\n<b>Reason:</b> <code>{reason}</code>",
+        reply_markup=reply_markup
+    )
+    try:
+        await k.pin()
+    except Exception:
+        pass
+    await bot.leave_chat(message.chat.id)
+    raise StopPropagation
+    

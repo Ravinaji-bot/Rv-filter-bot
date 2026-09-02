@@ -1,284 +1,335 @@
-import asyncio
-import aiohttp
-import re
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from database.ia_filterdb import (
-    get_search_results, 
-    get_file_details, 
-    is_chat_approved, 
-    is_user_banned,
-    get_all_file_titles,
-    save_movie_request,
-    get_manual_filter
+import logging
+from utils import (
+    get_size, is_check_admin, get_poster, get_posterx, temp, 
+    get_settings, save_group_settings, get_cap, clean_filename, 
+    clean_search_text, get_settings_text
 )
-from info import VDISK_API_KEY, TMDB_API_KEY, REQUEST_CHANNEL
-from utils import clean_file_name, get_spelling_suggestion, get_google_search_url
+from rapidfuzz import process
+from urllib.parse import quote_plus
 
-DEFAULT_THUMBNAIL = "https://telegra.ph/file/default_poster.jpg"
-DELETE_TIME_SECONDS = 120 
+from database.ia_filterdb import Media, Media2, get_search_results, get_bad_files
+from database.config_db import mdb
+from pyrogram.errors import MessageIdInvalid, UserIsBlocked, MessageNotModified, PeerIdInvalid, MessageDeleteForbidden
+from pyrogram import Client, filters, enums
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputMediaPhoto
+from info import (
+    ADMINS, DELETE_TIME, EMOJI_MODE, GRP_LNK, LANDSCAPE_POSTER, 
+    LANGUAGES, LOG_CHANNEL, MAX_B_TN, MSG_ALRT, MULTIPLE_DB, NO_RESULTS_MSG, 
+    OWNER_LNK, PICS, QUALITIES, REACTIONS, REQST_CHANNEL, SEASONS, 
+    SUPPORT_CHAT_ID, TMDB_ON_SEARCH, TMDB_POSTER, ULTRA_FAST_MODE, URL,
+    VDISK_DOMAIN, VDISK_API
+)
+from Script import script
+from pyrogram.errors.exceptions.bad_request_400 import MediaEmpty, PhotoInvalidDimensions, WebpageMediaEmpty
+from database.users_chats_db import db
+import asyncio
+import re
+import math
+import random
+import pytz
+from datetime import datetime, timedelta
+lock = asyncio.Lock()
 
-def clean_movie_title(title: str) -> str:
-    title = re.sub(r'\(.*?\)|\[.*?\]|\b(720p|1080p|480p|2160p|4k|HDRip|WEB-DL|Cam|BDRip|Hindi|English|Gujarati)\b', '', title, flags=re.IGNORECASE)
-    return title.strip()
+logger = logging.getLogger(__name__)
 
-async def fetch_landscape_poster(session: aiohttp.ClientSession, movie_name: str) -> str:
-    clean_name = clean_movie_title(movie_name)
-    url = f"https://api.themoviedb.org/3/search/movie?api_key={TMDB_API_KEY}&query={clean_name}"
-    try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
-            data = await resp.json()
-            results = data.get("results")
-            if results and len(results) > 0:
-                poster_path = results[0].get("backdrop_path") or results[0].get("poster_path")
-                if poster_path:
-                    return f"https://image.tmdb.org/t/p/w500{poster_path}"
-    except Exception as e:
-        print(f"TMDB Fetch Error: {e}")
-    return DEFAULT_THUMBNAIL
+TIMEZONE = "Asia/Kolkata"
+BUTTON = {}
+BUTTONS = {}
+FRESH = {}
+BUTTONS0 = {}
+BUTTONS1 = {}
+BUTTONS2 = {}
+SPELL_CHECK = {}
 
-async def get_vdisk_link(session: aiohttp.ClientSession, url: str) -> str:
-    api_endpoint = f"https://vdiskpro.com/api?api={VDISK_API_KEY}&url={url}"
-    try:
-        async with session.get(api_endpoint, timeout=aiohttp.ClientTimeout(total=3)) as resp:
-            data = await resp.json()
-            if data.get("status") == "success":
-                return data.get("shortlink")
-    except Exception as e:
-        print(f"VDisk Error: {e}")
-    return url
-
-async def auto_delete_messages(user_msg, bot_msg, delay=DELETE_TIME_SECONDS):
-    await asyncio.sleep(delay)
-    try:
-        await bot_msg.delete()
-    except Exception:
-        pass
-    try:
-        await user_msg.delete()
-    except Exception:
-        pass
-
-async def notify_admin_auto_request(client, user, movie_name):
-    user_info = f"{user.first_name} (@{user.username})" if user.username else f"{user.first_name} (`{user.id}`)"
-    await save_movie_request(user.id, user_info, movie_name)
-
-    btn = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Mark as Uploaded", callback_data=f"req_done_{user.id}")]
-    ])
-
-    request_msg = (
-        "🤖 **Auto Search Request Notification!**\n\n"
-        f"👤 **Searched By:** {user_info}\n"
-        f"🆔 **User ID:** `{user.id}`\n"
-        f"🔍 **Movie Not Found:** `{movie_name}`"
-    )
-
-    try:
-        await client.send_message(chat_id=REQUEST_CHANNEL, text=request_msg, reply_markup=btn)
-    except Exception as e:
-        print(f"Auto Request Channel Error: {e}")
-
-async def send_manual_filter_reply(client, message, manual_data):
-    text = manual_data.get("text", "")
-    file_id = manual_data.get("file_id")
-    media_type = manual_data.get("media_type")
-
-    if file_id and media_type:
-        if media_type == "document":
-            bot_msg = await message.reply_document(document=file_id, caption=text)
-        elif media_type == "video":
-            bot_msg = await message.reply_video(video=file_id, caption=text)
-        elif media_type == "photo":
-            bot_msg = await message.reply_photo(photo=file_id, caption=text)
-        elif media_type == "audio":
-            bot_msg = await message.reply_audio(audio=file_id, caption=text)
-        else:
-            bot_msg = await message.reply_text(text)
+@Client.on_message(filters.group & filters.text & filters.incoming & ~filters.regex(r"^/"))
+async def give_filter(client, message):
+    if EMOJI_MODE:
+        try:
+            await message.react(emoji=random.choice(REACTIONS), big=True)
+        except Exception:
+            await message.react(emoji="⚡️")
+            pass
+    await mdb.update_top_messages(message.from_user.id, message.text)
+    if message.chat.id != SUPPORT_CHAT_ID:
+        settings = await get_settings(message.chat.id)
+        try:
+            if settings['auto_ffilter']:
+                if re.search(r'https?://\S+|www\.\S+|t\.me/\S+', message.text):
+                    if await is_check_admin(client, message.chat.id, message.from_user.id):
+                        return
+                    return await message.delete()
+                await auto_filter(client, message)
+        except KeyError:
+            await save_group_settings(message.chat.id, 'auto_ffilter', True)
+            settings = await get_settings(message.chat.id)
+            if settings['auto_ffilter']:
+                await auto_filter(client, message) 
+        except Exception as e:
+            logger.exception("Error in auto filter: %s", e)
+            pass
     else:
-        bot_msg = await message.reply_text(text)
+        search = message.text
+        _, _, total_results = await get_search_results(chat_id=message.chat.id, query=search.lower(), offset=0, filter=True)
+        if total_results == 0:
+            return
+        await message.reply_text(
+            script.ALREADY_AVAILABLE_TXT.format(message.from_user.mention, total_results, search),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔍 ᴊᴏɪɴ ᴀɴᴅ ꜱᴇᴀʀᴄʜ ʜᴇʀᴇ 🔎", url=GRP_LNK)]])
+        )
+
+@Client.on_message(filters.private & filters.text & filters.incoming & ~filters.regex(r"^/") & ~filters.regex(r"(https?://)?(t\.me|telegram\.me|telegram\.dog)/"))
+async def pm_text(bot, message):
+    bot_id = bot.me.id
+    content = message.text
+    user = message.from_user.first_name
+    user_id = message.from_user.id
+    if EMOJI_MODE:
+        try:
+            await message.react(emoji=random.choice(REACTIONS), big=True)
+        except Exception:
+            await message.react(emoji="⚡️")
+            pass
+    if content.startswith(("#")):
+        return
+    try:
+        await mdb.update_top_messages(user_id, content)
+        pm_search = await db.pm_search_status(bot_id)
+        if pm_search:
+            await auto_filter(bot, message)
+        else:
+            await message.reply_text(
+                text=script.PM_SEARCH_DISABLED_TXT.format(user),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 ʀᴇǫᴜᴇsᴛ ʜᴇʀᴇ ", url=GRP_LNK)]])
+            )
+            await bot.send_message(
+                chat_id=LOG_CHANNEL,
+                text=script.PM_LOG_TXT.format(user, user_id, content)
+            )
+    except Exception:
+        pass
+
+@Client.on_callback_query(filters.regex(r"^next"))
+async def next_page(bot, query):
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    ident, req, key, offset = query.data.split("_")
+    curr_time = datetime.now(pytz.timezone('Asia/Kolkata')).time()
+    if int(req) not in [query.from_user.id, 0]:
+        return await query.answer(script.ALRT_TXT.format(query.from_user.first_name), show_alert=True)
+    try:
+        offset = int(offset)
+    except Exception:
+        offset = 0
+    if BUTTONS.get(key) is not None:
+        search = BUTTONS.get(key)
+    else:
+        search = FRESH.get(key)
+    if not search:
+        await query.answer(script.OLD_ALRT_TXT.format(query.from_user.first_name), show_alert=True)
+        return
+    files, n_offset, total = await get_search_results(query.message.chat.id, search, offset=offset, filter=True)
+    try:
+        n_offset = int(n_offset)
+    except Exception:
+        n_offset = 0
+
+    if not files:
+        return
+    temp.GETALL[key] = files
+    temp.SHORT[query.from_user.id] = query.message.chat.id
+    settings = await get_settings(query.message.chat.id)
     
-    asyncio.create_task(auto_delete_messages(message, bot_msg))
-
-@Client.on_message(filters.group & filters.text & ~filters.command(["start", "index", "request", "add", "del", "viewfilters"]))
-async def group_filter_search(client, message):
-    if not await is_chat_approved(message.chat.id):
-        return
-
-    if message.from_user and await is_user_banned(message.from_user.id):
-        return
-
-    raw_query = message.text.strip()
-
-    manual_data = await get_manual_filter(message.chat.id, raw_query)
-    if manual_data:
-        return await send_manual_filter_reply(client, message, manual_data)
-
-    results = await get_search_results(raw_query)
-    corrected_query = None
-
-    if not results:
-        all_titles = await get_all_file_titles()
-        suggested = await get_spelling_suggestion(raw_query, all_titles)
-        if suggested and suggested.lower() != raw_query.lower():
-            corrected_query = suggested
-            results = await get_search_results(corrected_query)
-
-    if not results:
-        if message.from_user:
-            asyncio.create_task(notify_admin_auto_request(client, message.from_user, raw_query))
-
-        google_url = get_google_search_url(raw_query)
-        buttons = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔍 Check Correct Spelling on Google", url=google_url)]
+    # Direct Vdiskpro Stream & File Buttons Structure
+    btn = []
+    for file in files:
+        # Generate Direct Vdisk Streaming URL
+        stream_url = f"{VDISK_DOMAIN}/watch/{file.file_id}" if VDISK_DOMAIN else f"{URL}watch/{file.file_id}"
+        btn.append([
+            InlineKeyboardButton(text=f"📁 {get_size(file.file_size)} - {clean_filename(file.file_name)}", callback_data=f'file#{file.file_id}'),
+            InlineKeyboardButton(text="🎬 Stream/Download", url=stream_url)
         ])
 
-        no_result_msg = await message.reply_text(
-            f"❌ **Movie not available in Database!**\n\n"
-            f"📡 **Your request has been automatically sent to the Admin.**\n"
-            f"If spelling is wrong, check correct spelling using Google button below:",
-            reply_markup=buttons
-        )
-        asyncio.create_task(auto_delete_messages(message, no_result_msg, delay=30))
-        return
-
-    bot_username = client.me.username
-    display_query = corrected_query if corrected_query else clean_file_name(raw_query)
-    
-    caption_text = ""
-    if corrected_query:
-        caption_text += f"💡 **Did you mean:** `{corrected_query}`?\n\n"
-    
-    caption_text += f"🎬 **Results for:** `{display_query}`\n\n"
-    caption_text += "👇 **Download / Stream Links:**\n\n"
-
-    for file in results:
-        file_name = clean_file_name(file.get('file_name', 'Unknown File'))
-        file_size = file.get('file_size', 'N/A')
-        file_id = file.get('file_id')
-        
-        pm_deep_link = f"https://t.me/{bot_username}?start=file_{file_id}"
-        caption_text += f"🔹 [{file_name} ({file_size})]({pm_deep_link})\n\n"
-
-    caption_text += f"⏱️ *This message will be deleted in {int(DELETE_TIME_SECONDS/60)} minutes!*"
-
-    google_url = get_google_search_url(display_query)
-    btn_list = [
-        [InlineKeyboardButton("📥 Get Files in PM", url=f"https://t.me/{bot_username}?start=search_{display_query}")],
-        [InlineKeyboardButton("🔍 Check Spelling on Google", url=google_url)]
-    ]
-
-    reply_msg = await message.reply_text(
-        text=caption_text,
-        disable_web_page_preview=True,
-        reply_markup=InlineKeyboardMarkup(btn_list)
-    )
-
-    asyncio.create_task(auto_delete_messages(message, reply_msg))
-
-@Client.on_message(filters.private & filters.text & ~filters.command(["start", "index", "ban", "unban", "stats", "request", "add", "del", "viewfilters"]))
-async def pm_filter_search(client, message):
-    if await is_user_banned(message.from_user.id):
-        return await message.reply_text("🚫 **You are banned from using this bot!**")
-
-    raw_query = message.text.strip()
-
-    manual_data = await get_manual_filter(message.chat.id, raw_query)
-    if manual_data:
-        return await send_manual_filter_reply(client, message, manual_data)
-
-    results = await get_search_results(raw_query)
-    corrected_query = None
-
-    if not results:
-        all_titles = await get_all_file_titles()
-        suggested = await get_spelling_suggestion(raw_query, all_titles)
-        if suggested and suggested.lower() != raw_query.lower():
-            corrected_query = suggested
-            results = await get_search_results(corrected_query)
-
-    if not results:
-        asyncio.create_task(notify_admin_auto_request(client, message.from_user, raw_query))
-
-        google_url = get_google_search_url(raw_query)
-        buttons = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔍 Check Correct Spelling on Google", url=google_url)]
-        ])
-        
-        reply_msg = await message.reply_text(
-            f"❌ **Movie not available in Database!**\n\n"
-            f"📩 **Your automatic request has been sent to the Admin.**",
-            reply_markup=buttons
-        )
-        asyncio.create_task(auto_delete_messages(message, reply_msg, delay=30))
-        return
-
-    buttons = []
-    for file in results:
-        file_name = clean_file_name(file.get('file_name', 'Unknown'))
-        file_size = file.get('file_size', 'N/A')
-        file_id = file.get('file_id')
-        
-        btn_text = f"🎬 {file_name} [{file_size}]"
-        buttons.append([InlineKeyboardButton(btn_text, callback_data=f"send_{file_id}")])
-
-    google_url = get_google_search_url(corrected_query or raw_query)
-    buttons.append([InlineKeyboardButton("🔍 Check Spelling on Google", url=google_url)])
-
-    heading = f"💡 **Did you mean:** `{corrected_query}`?\n\n" if corrected_query else ""
-    
-    reply_msg = await message.reply_text(
-        f"{heading}🔍 **Search Results:** `{clean_file_name(corrected_query or raw_query)}`\n\n⏱️ *This message will be deleted in {int(DELETE_TIME_SECONDS/60)} minutes.*",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-    asyncio.create_task(auto_delete_messages(message, reply_msg))
-
-async def send_poster_and_stream(client, message_or_query, file_id):
-    file_details = await get_file_details(file_id)
-    if not file_details:
-        return
-
-    file_name = clean_file_name(file_details.get("file_name", "Unknown File"))
-    file_size = file_details.get("file_size", "N/A")
-    poster_url = file_details.get("poster")
-
-    target_link = f"https://t.me/{client.me.username}?start=file_{file_id}"
-
-    async with aiohttp.ClientSession() as session:
-        if not poster_url or poster_url == "N/A":
-            poster_url = await fetch_landscape_poster(session, file_name)
-        
-        vdisk_link = await get_vdisk_link(session, target_link)
-
-    buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🍿 Stream / Fast Download (VDisk)", url=vdisk_link)],
-        [InlineKeyboardButton("❌ Close", callback_data="close_data")]
+    btn.insert(0, [
+        InlineKeyboardButton('Qᴜᴀʟɪᴛʏ', callback_data=f"qualities#{req}#{key}"),
+        InlineKeyboardButton("Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{req}#{key}"),
+        InlineKeyboardButton("Sᴇᴀsᴏɴ", callback_data=f"seasons#{req}#{key}")
     ])
 
-    caption = (
-        f"🎬 **Title:** `{file_name}`\n"
-        f"💾 **Size:** `{file_size}`\n\n"
-        "👇 **Click the button below to Watch / Download:**\n\n"
-        f"⏱️ *This file card will be deleted in {int(DELETE_TIME_SECONDS/60)} minutes!*"
-    )
-
-    user_msg = message_or_query if hasattr(message_or_query, 'delete') else message_or_query.message
+    if ULTRA_FAST_MODE:
+        if 0 < offset <= 10:
+            off_set = 0
+        elif offset == 0:
+            off_set = None
+        else:
+            off_set = offset - 10
+        if n_offset == 0:
+            btn.append([InlineKeyboardButton("⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"), InlineKeyboardButton(f"{math.ceil(int(offset)/10)+1}", callback_data="pages")])
+        elif off_set is None:
+            btn.append([InlineKeyboardButton("ᴘᴀɢᴇ", callback_data="pages"), InlineKeyboardButton(f"{math.ceil(int(offset)/10)+1}", callback_data="pages"), InlineKeyboardButton("ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")])
+        else:
+            btn.append([
+                InlineKeyboardButton("⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"),
+                InlineKeyboardButton(f"{math.ceil(int(offset)/10)+1}", callback_data="pages"),
+                InlineKeyboardButton("ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")
+            ])
 
     try:
-        reply_msg = await user_msg.reply_photo(photo=poster_url, caption=caption, reply_markup=buttons)
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(btn))
+    except (MessageNotModified, MessageIdInvalid):
+        pass
+    await query.answer()
+
+@Client.on_callback_query(filters.regex(r"^spol"))
+async def advantage_spoll_choker(bot, query):
+    _, id, user = query.data.split('#')
+    if int(user) != 0 and query.from_user.id != int(user):
+        return await query.answer(script.ALRT_TXT.format(query.from_user.first_name), show_alert=True)
+    movies = await get_posterx(id, id=True) if TMDB_ON_SEARCH else await get_poster(id, id=True)
+    movie = movies.get('title')
+    movie = re.sub(r"[:-]", " ", movie)
+    movie = re.sub(r"\s+", " ", movie).strip()
+    await query.answer(script.TOP_ALRT_MSG)
+    files, offset, total_results = await get_search_results(query.message.chat.id, movie, offset=0, filter=True)
+    if files:
+        k = (movie, files, offset, total_results)
+        await auto_filter(bot, query, k)
+    else:
+        reqstr1 = query.from_user.id if query.from_user else 0
+        reqstr = await bot.get_users(reqstr1)
+        if NO_RESULTS_MSG:
+            try:
+                await bot.send_message(chat_id=LOG_CHANNEL, text=script.NORSLTS.format(reqstr.id, reqstr.mention, movie))
+            except Exception as e:
+                logger.error("Error In Spol: %s", e)
+        btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔰 ʀᴇǫᴜᴇsᴛ ᴛᴏ ᴀᴅᴍɪɴ 🔰", url=OWNER_LNK)]])
+        k = await query.message.edit(script.MVE_NT_FND, reply_markup=btn)
+        await asyncio.sleep(10)
+        await k.delete()
+        # Qualities Filter Callback
+@Client.on_callback_query(filters.regex(r"^qualities#"))
+async def qualities_cb_handler(client: Client, query: CallbackQuery):
+    _, req, key = query.data.split("#")
+    try:
+        if int(req) not in [query.from_user.id, 0]:
+            return await query.answer(script.ALRT_TXT.format(query.from_user.first_name), show_alert=True)
     except Exception:
-        reply_msg = await user_msg.reply_text(text=caption, reply_markup=buttons)
+        pass
 
-    asyncio.create_task(auto_delete_messages(user_msg, reply_msg))
+    btn = []
+    for i in range(0, len(QUALITIES), 2):
+        q1 = QUALITIES[i]
+        row = [InlineKeyboardButton(text=q1, callback_data=f"fq#{q1.lower()}#{req}#{key}")]
+        if i + 1 < len(QUALITIES):
+            q2 = QUALITIES[i + 1]
+            row.append(InlineKeyboardButton(text=q2, callback_data=f"fq#{q2.lower()}#{req}#{key}"))
+        btn.append(row)
 
-@Client.on_callback_query(filters.regex(r"^send_"))
-async def send_file_card(client, query):
-    await query.answer("⚡ Generating Link...", show_alert=False)
-    file_id = query.data.split("_")[1]
-    await send_poster_and_stream(client, query, file_id)
+    btn.insert(0, [InlineKeyboardButton(text="⇊ ꜱᴇʟᴇᴄᴛ ǫᴜᴀʟɪᴛʏ ⇊", callback_data="ident")])
+    btn.append([InlineKeyboardButton(text="↭ ʙᴀᴄᴋ ᴛᴏ ꜰɪʟᴇs ↭", callback_data=f"fq#homepage#{req}#{key}")])
 
-@Client.on_callback_query(filters.regex("close_data"))
-async def close_cb(client, query):
-    await query.message.delete()
-                                       
+    await query.edit_message_reply_markup(InlineKeyboardMarkup(btn))
+
+
+@Client.on_callback_query(filters.regex(r"^fq#"))
+async def filter_qualities_cb_handler(client: Client, query: CallbackQuery):
+    _, qual, req, key = query.data.split("#")
+    search = FRESH.get(key, "")
+    
+    # Dash aur hyphens ko remove karke clean string banayein
+    search = re.sub(r"[-_–—]", " ", search)
+    search = re.sub(r"\s+", " ", search).strip()
+    
+    chat_id = query.message.chat.id
+    try:
+        if int(req) not in [query.from_user.id, 0]:
+            return await query.answer(script.ALRT_TXT.format(query.from_user.first_name), show_alert=True)
+    except Exception:
+        pass
+
+    if qual != "homepage":
+        search = f"{search} {qual}"
+
+    BUTTONS[key] = search
+    files, offset, total_results = await get_search_results(chat_id, search, offset=0, filter=True)
+    
+    if not files:
+        return await query.answer("🚫 ɴᴏ ꜰɪʟᴇꜱ ᴡᴇʀᴇ ꜰᴏᴜɴᴅ 🚫", show_alert=True)
+
+    btn = []
+    for file in files:
+        stream_url = f"{VDISK_DOMAIN}/watch/{file.file_id}" if VDISK_DOMAIN else f"{URL}watch/{file.file_id}"
+        btn.append([
+            InlineKeyboardButton(text=f"📁 {get_size(file.file_size)} - {clean_filename(file.file_name)}", callback_data=f'file#{file.file_id}'),
+            InlineKeyboardButton(text="🎬 Stream", url=stream_url)
+        ])
+
+    btn.insert(0, [
+        InlineKeyboardButton('Qᴜᴀʟɪᴛʏ', callback_data=f"qualities#{req}#{key}"),
+        InlineKeyboardButton("Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{req}#{key}"),
+        InlineKeyboardButton("Sᴇᴀsᴏɴ", callback_data=f"seasons#{req}#{key}")
+    ])
+
+    try:
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(btn))
+    except Exception:
+        pass
+    await query.answer()
+
+
+# Auto Filter Core Handler
+async def auto_filter(client, msg, spoll=None):
+    if spoll:
+        message = msg.message
+        search, files, offset, total_results = spoll
+    else:
+        message = msg
+        search = message.text
+
+    # Strict search text cleaning (Desk / Dash remove karne ke liye)
+    search = re.sub(r"[-_–—]", " ", search)
+    search = re.sub(r"\s+", " ", search).strip()
+
+    if not spoll:
+        files, offset, total_results = await get_search_results(message.chat.id, search, offset=0, filter=True)
+
+    if not files:
+        if SPELL_CHECK_REPLY:
+            return await advantage_spoll_choker(client, message)
+        return
+
+    key = f"{message.chat.id}-{message.id}"
+    FRESH[key] = search
+
+    btn = []
+    for file in files:
+        stream_url = f"{VDISK_DOMAIN}/watch/{file.file_id}" if VDISK_DOMAIN else f"{URL}watch/{file.file_id}"
+        btn.append([
+            InlineKeyboardButton(text=f"📁 {get_size(file.file_size)} - {clean_filename(file.file_name)}", callback_data=f'file#{file.file_id}'),
+            InlineKeyboardButton(text="🎬 Stream", url=stream_url)
+        ])
+
+    btn.insert(0, [
+        InlineKeyboardButton('Qᴜᴀʟɪᴛʏ', callback_data=f"qualities#{message.from_user.id}#{key}"),
+        InlineKeyboardButton("Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{message.from_user.id}#{key}"),
+        InlineKeyboardButton("Sᴇᴀsᴏɴ", callback_data=f"seasons#{message.from_user.id}#{key}")
+    ])
+
+    cap = script.CAPTION.format(
+        file_name=clean_filename(files[0].file_name),
+        file_size=get_size(files[0].file_size),
+        file_url=f"{VDISK_DOMAIN}/watch/{files[0].file_id}"
+    )
+
+    try:
+        await message.reply_text(
+            text=cap,
+            reply_markup=InlineKeyboardMarkup(btn),
+            disable_web_page_preview=True,
+            parse_mode=enums.ParseMode.HTML
+        )
+    except Exception as e:
+        logger.exception("Error sending auto filter message: %s", e)
+        

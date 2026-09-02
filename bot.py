@@ -1,45 +1,116 @@
+import plugins.monkey_patch  # noqa: F401
 import logging
+import logging.config
+from pyrogram import idle, __version__
+from pyrogram.raw.all import layer
+import time
+from pyrogram.errors import FloodWait
 import asyncio
-from pyrogram import Client, enums, idle
-from info import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL
-from database.ia_filterdb import create_db_indexes
+from datetime import date, datetime
+from pathlib import Path
+import pytz
+from aiohttp import web
+from database.ia_filterdb import Media, Media2
+from database.users_chats_db import db
+from info import MULTIPLE_DB, ON_HEROKU, LOG_STR, LOG_CHANNEL, PORT
+from utils import temp
+from Script import script
+from plugins import web_server, keep_alive
+from dreamxbotz.Bot import dreamxbotz as vdiskbot
+from dreamxbotz.util.keepalive import ping_server
+from dreamxbotz.Bot.clients import initialize_clients
+from PIL import Image
 
-logging.basicConfig(level=logging.INFO)
+Image.MAX_IMAGE_PIXELS = 500_000_000
 
-app = Client(
-    "AutoFilterBot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    plugins=dict(root="plugins"),
-    parse_mode=enums.ParseMode.MARKDOWN
-)
+logger = logging.getLogger(__name__)
+logging.config.fileConfig('logging.conf')
+logging.getLogger().setLevel(logging.INFO)
+logging.getLogger("pyrogram").setLevel(logging.ERROR)
+logging.getLogger("imdbpy").setLevel(logging.ERROR)
+logging.getLogger("aiohttp").setLevel(logging.ERROR)
+logging.getLogger("aiohttp.web").setLevel(logging.ERROR)
+logging.getLogger("pymongo").setLevel(logging.WARNING)
 
-async def main():
-    await app.start()
-    await create_db_indexes()
+botStartTime = time.time()
+
+def get_plugins_names(plugins_dir="plugins"):
+    plugins_path = Path(plugins_dir)
+    if not plugins_path.exists():
+        logger.warning("Plugins directory not found: %s", plugins_path)
+        return []
+
+    return [
+        ".".join(file.relative_to(plugins_path).with_suffix("").parts)
+        for file in sorted(plugins_path.rglob("*.py"))
+        if file.name != "__init__.py"
+    ]
+
+async def start_vdisk_bot():
+    logger.info('\n\nInitializing VDisk Auto Filter Bot...')
+    vdiskbot.loop = asyncio.get_running_loop()
+    await vdiskbot.start()
+    bot_info = await vdiskbot.get_me()
+    vdiskbot.username = bot_info.username
+    await initialize_clients()
+    plugins_names = get_plugins_names()
+    if plugins_names:
+        plugins_list = "\n".join(f"  {i}. {name}" for i, name in enumerate(plugins_names, 1))
+        logger.info("Plugins Found (%d):\n%s", len(plugins_names), plugins_list)
+    else:
+        logger.warning("No plugins found.")
+
+    if ON_HEROKU:
+        asyncio.create_task(ping_server())
+    b_users, b_chats = await db.get_banned()
+    temp.BANNED_USERS = b_users
+    temp.BANNED_CHATS = b_chats
+    await Media.ensure_indexes()
+    if MULTIPLE_DB:
+        await Media2.ensure_indexes()
+        logger.info("Multiple Database Mode On. Now Files Will Be Saved In Second DB If First DB Is Full")
+    else:
+        logger.info("Single DB Mode On ! Files Will Be Saved In First Database")
     
-    bot_info = await app.get_me()
-    print(f"🚀 Bot Started Successfully: @{bot_info.username}")
+    me = bot_info
+    temp.ME = me.id
+    temp.U_NAME = me.username
+    temp.B_NAME = me.first_name
+    temp.B_LINK = me.mention
+    vdiskbot.username = '@' + me.username
+    
+    logger.info(f"{me.first_name} with Pyrogram v{__version__} (Layer {layer}) started on {me.username}.")
+    logger.info(LOG_STR)
+    logger.info(script.LOGO)
+    tz = pytz.timezone('Asia/Kolkata')
+    today = date.today()
+    now = datetime.now(tz)
+    current_time = now.strftime("%I:%M:%S %p")
     
     if LOG_CHANNEL:
         try:
-            startup_text = (
-                "🟢 **Bot Status Notification**\n\n"
-                f"🤖 **Bot Name:** {bot_info.first_name}\n"
-                f"🆔 **Bot Username:** @{bot_info.username}\n"
-                "⚡ **Status:** `Healthy & Operational`\n"
-                "🚀 **Engine:** Pyrogram Engine Online"
-            )
-            await app.send_message(chat_id=LOG_CHANNEL, text=startup_text)
-            logging.info("✅ Startup notification sent to Log Channel!")
+            await vdiskbot.send_message(chat_id=LOG_CHANNEL, text=script.RESTART_TXT.format(temp.B_LINK, today, current_time))
         except Exception as e:
-            logging.error(f"Failed to send startup log: {e}")
+            logger.error(f"Failed to send restart message to LOG_CHANNEL: {e}")
 
-    await idle()
-    await app.stop()
+    app = web.AppRunner(await web_server())
+    await app.setup()
+    bind_address = "0.0.0.0"
+    await web.TCPSite(app, bind_address, PORT).start()
+    asyncio.create_task(keep_alive())
 
-if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
-    
+    try:
+        await idle()
+    finally:
+        await app.cleanup()
+        await vdiskbot.stop()
+
+if __name__ == '__main__':
+    try:
+        logger.info('Service started...')
+        asyncio.run(start_vdisk_bot())
+    except FloodWait as e:
+        logger.info(f"FloodWait! Sleeping for {e.value} seconds.")
+        time.sleep(e.value)
+    except KeyboardInterrupt:
+        logger.info('Service stopped. Bye.')

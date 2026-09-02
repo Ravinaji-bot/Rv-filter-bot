@@ -60,31 +60,44 @@ SPELL_IMG = environ.get("SPELL_IMG", "https://graph.org/file/13702ae26fb05df5266
 FSUB_PICS = environ.get('FSUB_PICS', 'https://graph.org/file/7478ff3eac37f4329c3d8.jpg').split()
 
 # ============================
-# Channels & Users Configuration (3 Channels Only)
+# Channels & Admins Configuration
 # ============================
 ADMINS = parse_id_list('ADMINS', '634637418')
 
-# 1. Database Channel (Where movie files are stored & indexed)
+# 1. Database Channel (Files indexing ke liye)
 DB_CHANNEL = [int(ch) if id_pattern.match(ch.strip()) else ch for ch in environ.get('DB_CHANNEL', '-100').split()]
 
-# 2. Log Channel
+# 2. Log Channel (Errors & Logs ke liye)
 LOG_CHANNEL = int(environ.get('LOG_CHANNEL', '-100'))
 
-# 3. Request Channel
+# 3. New Movie Update Channel (Notification ke liye)
+MOVIE_UPDATE_CHANNEL = int(environ.get('MOVIE_UPDATE_CHANNEL', '-100'))
+MOVIE_UPDATE_NOTIFICATION = is_enabled(environ.get('MOVIE_UPDATE_NOTIFICATION', "True"), True)
+
+# 4. Request Channel
 REQST_CHANNEL = int(environ.get('REQST_CHANNEL_ID', '-100')) if id_pattern.match(environ.get('REQST_CHANNEL_ID', '').strip()) else None
 
-# Support Chat Links
-SUPPORT_CHAT_ID = int(environ.get('SUPPORT_CHAT_ID', '-100')) if id_pattern.match(environ.get('SUPPORT_CHAT_ID', '').strip()) else None
-SUPPORT_CHAT = environ.get('SUPPORT_CHAT', 'https://t.me/')
-
-# Backward Compatibility (Taaki purane bot scripts me error na aaye)
+# Backward Compatibility & Safe Placeholders
 CHANNELS = DB_CHANNEL
 BIN_CHANNEL = LOG_CHANNEL
+SUPPORT_CHAT_ID = None
+SUPPORT_CHAT = "https://t.me/"
+GRP_LNK = "https://t.me/"
+OWNER_LNK = "https://t.me/"
+UPDATE_CHNL_LNK = "https://t.me/"
+AUTH_USERS = ADMINS
+
+# ============================
+# TMDB & Metadata Settings
+# ============================
+TMDB_API_KEY = environ.get('TMDB_API_KEY', '')
+TMDB_POSTER = is_enabled(environ.get('TMDB_POSTER', "True"), True)
+LANDSCAPE_POSTER = is_enabled(environ.get('LANDSCAPE_POSTER', "True"), True)
 
 # ============================
 # Vdiskpro Streaming Configuration
 # ============================
-VDISK_API = environ.get('VDISK_API', '') # API Key for Vdiskpro / Direct Streamer
+VDISK_API = environ.get('VDISK_API', '')
 VDISK_DOMAIN = environ.get('VDISK_DOMAIN', 'https://vdiskpro.com')
 
 # ============================
@@ -96,36 +109,6 @@ COLLECTION_NAME = environ.get('COLLECTION_NAME', 'vdisk_files')
 
 MULTIPLE_DB = is_enabled(environ.get('MULTIPLE_DB', "False"), False)
 DATABASE_URI2 = environ.get('DATABASE_URI2', "") if MULTIPLE_DB else DATABASE_URI
-
-# ============================
-# Movie Notification & Metadata
-# ============================
-MOVIE_UPDATE_NOTIFICATION = is_enabled(environ.get('MOVIE_UPDATE_NOTIFICATION', "False"), False)
-MOVIE_UPDATE_CHANNEL = int(environ.get('MOVIE_UPDATE_CHANNEL', '-100'))
-TMDB_API_KEY = environ.get('TMDB_API_KEY', '')
-TMDB_POSTER = is_enabled(environ.get('TMDB_POSTER', "True"), True)
-LANDSCAPE_POSTER = is_enabled(environ.get('LANDSCAPE_POSTER', "True"), True)
-
-# ============================
-# Verification Settings
-# ============================
-IS_VERIFY = is_enabled(environ.get('IS_VERIFY', 'False'), False)
-LOG_VR_CHANNEL = LOG_CHANNEL
-VERIFY_IMG = environ.get("VERIFY_IMG", "https://telegra.ph/file/9ecc5d6e4df5b83424896.jpg")
-
-TUTORIAL = environ.get("TUTORIAL", "https://t.me/")
-SHORTENER_API = environ.get("SHORTENER_API", "")
-SHORTENER_WEBSITE = environ.get("SHORTENER_WEBSITE", "")
-
-# ============================
-# Links & Authorization
-# ============================
-GRP_LNK = environ.get('GRP_LNK', 'https://t.me/')
-OWNER_LNK = environ.get('OWNER_LNK', 'https://t.me/')
-UPDATE_CHNL_LNK = environ.get('UPDATE_CHNL_LNK', 'https://t.me/')
-
-auth_users = parse_id_list('AUTH_USERS', '')
-AUTH_USERS = list(set(auth_users + ADMINS))
 
 # ============================
 # Formatting & Filter Options
@@ -207,4 +190,4 @@ Bot_cmds = {
     "info": "Get User Info",
     "restart": "Restart Bot",
     "maintenance": "Maintenance Mode",
-          }
+}
